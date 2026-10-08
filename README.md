@@ -57,6 +57,7 @@
 | Комментарии | 200 | 200 Б | 40 КБ |
 | Членство в сообществах | 30 | 5 КБ | 150 КБ |
 | Дружба | 150 | 100 Б | 15 КБ |
+| Лайки | 1 000 | 50 Б | 50 КБ |
 | Профиль | 1 | 2 КБ | 2 КБ |
 | **Итого** | | | **≈ 46 МБ** |
 
@@ -70,10 +71,11 @@
 | Комментарии | 18,9 млрд | 3,8 ТБ |
 | Членство в сообществах | 2,8 млрд | 14,1 ТБ |
 | Дружба | 14,1 млрд | 1,4 ТБ |
+| Лайки | 94,3 млрд | 4,7 ТБ |
 | Профили | 94,3 млн | 0,19 ТБ |
 | **Итого** | | **≈ 4,4 ПБ** |
 
-Текстовые данные (без фото и аватаров): ≈ 29 ТБ. Сравнение: хранилище фото VK ≈ 250 ПБ без репликации (вся база сервиса); наш расчет - модель MVP на активную аудиторию.
+Текстовые данные (без фото и аватаров): ≈ 34 ТБ. Сравнение: хранилище фото VK ≈ 250 ПБ без репликации (вся база сервиса); наш расчет - модель MVP на активную аудиторию.
 
 ### Сетевой трафик
 
@@ -321,7 +323,7 @@ Sticky sessions не используются: application stateless.
 | Запись в БД | 5 395 | 1 411 | 1 494 | 8 300 |
 | Master-шарды (запись / 600) | 9 | 3 | 3 | 15 |
 
-Данные: текстовые ≈ 29 ТБ (без фото) на копию; при 15 master-серверах ≈ 2 ТБ на сервер на копию.
+Данные: текстовые ≈ 34 ТБ (без фото) на копию; при 15 master-серверах ≈ 2 ТБ на сервер на копию.
 
 Мощность с учетом отказа любого одного ДЦ (остальные ≤ 85 %: 55 000 / 850 ≥ 65 узлов в двух оставшихся ДЦ):
 
@@ -352,6 +354,95 @@ Sticky sessions не используются: application stateless.
 
 Минусы: сложнее администрирование, есть риск упереться в неделимый кусок (лента: основной трафик идет в один пул).
 
+## 5. Логическая схема БД
+
+СУБД - реляционная MySQL-подобная. Правила шардинга: без JOIN, транзакций, триггеров и хранимых процедур, денормализация, поиск только по индексу, шардинг по первичному ключу. Все ссылки между таблицами - логические (без FOREIGN KEY): таблицы лежат на разных шардах.
+
+### 5.1. ER-диаграмма
+
+![Логическая схема БД](images/logic.svg)
+
+
+### 5.2. Сущности
+
+
+Нагрузка по таблицам (до кеша; в БД доходит ≈ 4 % чтения, п. 4.6):
+
+| Таблица | Поля | Размер строки | Чтение, RPS | Запись, RPS |
+| --- | --- | --- | --- | --- |
+| `users` | id BIGINT, email VARCHAR, password_hash VARCHAR, name VARCHAR, birth_date DATE, avatar_id BIGINT, home_dc TINYINT, created_at/last_login DATETIME | 2 КБ | 7 500 (профиль) + 3 000 (вход) = 10 500 | 30 (редактирование профиля) |
+| `sessions` | session_id CHAR(64), user_id BIGINT, device VARCHAR, expires_at DATETIME | ≈ 200 Б | 55 000 (каждый динамический запрос) | 3 000 (вход) |
+| `friendships` | user_id, friend_id BIGINT, status TINYINT (заявка / друзья), created_at DATETIME | 100 Б | 22 600 (лента) + 3 000 (список друзей) = 25 600 | 75 (заявка) × 2 (строка у отправителя и у получателя) = 150 |
+| `posts` | id BIGINT, author_id BIGINT, community_id BIGINT NULL, text TEXT, photo_ids JSON, author_name VARCHAR, author_avatar_id BIGINT, created_at DATETIME | 1 КБ | 22 600 (лента) + 12 100 (пост) + 7 500 (профиль) = 42 200 | 230 (создание поста) |
+| `post_stats` | post_id BIGINT, likes_count INT, comments_count INT | ≈ 20 Б | 22 600 (лента) + 12 100 (пост) = 34 700 | 4 500 (лайк) + 3 000 (комментарий) = 7 500 |
+| `likes` | user_id, post_id BIGINT, created_at DATETIME | ≈ 50 Б | 22 600 (лента) + 12 100 (пост) = 34 700 | 4 500 (лайк) |
+| `comments` | id BIGINT, post_id BIGINT, author_id BIGINT, text VARCHAR(1000), author_name VARCHAR, created_at DATETIME | 200 Б | 12 100 (пост) | 3 000 (комментарий) |
+| `photos` | id BIGINT, owner_id BIGINT, storage_key VARCHAR, size INT, created_at DATETIME | ≈ 200 Б | 12 100 (пост) | 450 (загрузка фото) |
+| `communities` | id BIGINT, name VARCHAR, description TEXT, owner_id BIGINT, members_count INT, created_at DATETIME | ≈ 1 КБ | 1 500 (сообщество) | 15 (счетчик участников при вступлении) |
+| `community_members` | community_id, user_id BIGINT, role TINYINT, joined_at DATETIME | 5 КБ | 1 500 (сообщество) | 15 (вступление) |
+
+### 5.3. Требования к консистентности
+
+| Уровень | Таблицы | Почему |
+| --- | --- | --- |
+| Strong | `users`, `sessions` | логин, права доступа, читаем из master в home-DC |
+| Causal | `friendships`, `community_members` | принятие заявки не раньше самой заявки; участник не появляется в сообществе, которого еще не видно |
+| Eventual | `posts`, `comments`, `likes`, `post_stats`, `photos`, `communities` | асинхронная репликация между ДЦ, счетчики - сумма по шардам, автор видит свои данные сразу |
+
+### 5.4. Шардирование и ключи
+
+Все таблицы - виртуальные шарды (≈ 8 000), один master на шард в home-DC. Запись всегда идет в шард автора действия.
+
+| Таблица | Первичный ключ | Ключ шардирования | Почему |
+| --- | --- | --- | --- |
+| `users` | `id` | `id` | вся работа с пользователем в одном шарде |
+| `sessions` | `session_id` | `user_id` | сессии пользователя рядом с профилем; разбор по токену - через кеш |
+| `friendships` | (`user_id`, `friend_id`) | `user_id` | список друзей - один шард |
+| `posts` | `id` | `author_id` | стена автора и сборка ленты - по шардам друзей |
+| `likes` | (`user_id`, `post_id`) | `user_id` | запись в шард лайкнувшего (п. 3.4); снять лайк - одна строка |
+| `comments` | `id` | `author_id` | запись в шард автора (п. 3.4) |
+| `photos` | `id` | `owner_id` | фото пользователя в его шарде |
+| `communities` | `id` | `id` | |
+| `community_members` | (`community_id`, `user_id`) | `user_id` | список сообществ пользователя - один шард; список участников - через индекс |
+| `post_stats` | `post_id` | `post_id` | один счетчик на пост; обновляется асинхронно |
+
+`id` - BIGINT, генерируется по схеме «номер шарда + последовательность» (snowflake-подобно), чтобы по `id` определять шард без обращения к БД; для `users`, `posts`, `comments`, `photos` в `id` зашит шард автора.
+
+### 5.5. Индексы
+
+Поиск только по индексу.
+
+| Таблица / индекс | Ключ | Шардирование | Для чего |
+| --- | --- | --- | --- |
+| `users` | UNIQUE `email` | сквозной индекс `email → user_id` | логин |
+| `posts` | (`author_id`, `created_at` DESC) | локальный, в шарде автора | стена, сборка ленты |
+| `posts_by_community` | (`community_id`, `created_at` DESC) → `post_id` | по `community_id` | посты сообщества |
+| `friendships` | (`friend_id`, `status`) | сквозной, по `friend_id` | входящие заявки |
+| `likes_by_post` | `post_id` → `user_id` | по `post_id` | кто лайкнул пост; пересчет счетчика |
+| `comments_by_post` | (`post_id`, `created_at`) → `comment_id`, `author_id` | по `post_id` | комментарии под постом (иначе пришлось бы опрашивать все шарды) |
+| `community_members_by_community` | `community_id` → `user_id` | по `community_id` | участники сообщества |
+| `sessions` | `user_id` | локальный | выход со всех устройств |
+
+### 5.6. Денормализация
+
+| Что | Куда | Зачем |
+| --- | --- | --- |
+| `author_name`, `author_avatar_id` | `posts` | вывод поста и ленты без чтения `users` с другого шарда |
+| `author_name` | `comments` | то же для комментариев |
+| `likes_count`, `comments_count` | `post_stats` | не считать `COUNT(*)` по шардам при выводе ленты |
+| `members_count` | `communities` | то же для сообщества |
+| `photo_ids` (JSON) | `posts` | пост со всеми фото - одним чтением |
+
+
+### 5.7. Лента
+
+Лента не хранится отдельной таблицей, собирается на чтении:
+
+1. Читаем список друзей из `friendships` (шард пользователя).
+2. Параллельно читаем последние посты друзей по индексу (`author_id`, `created_at`) из шардов авторов (локальные реплики в ближайшем ДЦ).
+3. Склеиваем в приложении, берем верх по `created_at`, добираем `post_stats` и флаги лайков.
+4. Результат кладется в memcached на короткое время (ключ `feed:{user_id}`).
+
 ## Источники
 
 1. <a id="source1"></a>[VK - результаты за II квартал 2026 года](https://vk.company.ru/ru/investors/info/12383/) - MAU, DAU.
@@ -360,3 +451,4 @@ Sticky sessions не используются: application stateless.
 4. <a id="source4"></a>[FAQ по архитектуре ВКонтакте](https://habr.com/ru/companies/oleg-bunin/articles/449254/) - фронты nginx с общими IP, регион по BGP-префиксам, anycast, ketama, RPC-proxy.
 5. <a id="source5"></a>[TAO: Facebook's Distributed Data Store (USENIX ATC 2013)](https://www.usenix.org/system/files/conference/atc13/atc13-bronson.pdf) - запись через master-регион 74,4 мс против 12,1 мс, hit ratio 96,4 %, лаг ≈ 1 с.
 6. <a id="source6"></a>[iKS-Media - Пиринг для облаков](https://www.iksmedia.ru/articles/5630138-Piring-dlya-oblakov.html) - RTT от Москвы: Владивосток 114, Красноярск 53, Омск 42 мс.
+7. <a id="source7"></a>Быков А. Проектирование высоконагруженных систем, лекция 5 «Масштабирование баз данных» - правила шардинга, денормализация, сквозные индексы.
