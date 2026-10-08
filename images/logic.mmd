@@ -1,0 +1,87 @@
+erDiagram
+    users ||--o{ sessions : "user_id"
+    users ||--o{ friendships : "user_id, friend_id"
+    users ||--o{ posts : "author_id"
+    users ||--o{ photos : "owner_id"
+    users ||--o{ likes : "user_id"
+    users ||--o{ comments : "author_id"
+    users ||--o{ community_members : "user_id"
+    communities ||--o{ community_members : "community_id"
+    communities ||--o{ posts : "community_id"
+    posts ||--|| post_stats : "post_id"
+    posts ||--o{ comments : "post_id"
+    posts ||--o{ likes : "post_id"
+    posts }o--o{ photos : "photo_ids"
+
+    users {
+        BIGINT id PK
+        VARCHAR email UK
+        VARCHAR password_hash
+        VARCHAR name
+        DATE birth_date
+        BIGINT avatar_id
+        TINYINT home_dc
+        DATETIME created_at
+        DATETIME last_login
+    }
+    sessions {
+        CHAR session_id PK
+        BIGINT user_id
+        VARCHAR device
+        DATETIME expires_at
+    }
+    friendships {
+        BIGINT user_id PK
+        BIGINT friend_id PK
+        TINYINT status
+        DATETIME created_at
+    }
+    posts {
+        BIGINT id PK
+        BIGINT author_id
+        BIGINT community_id
+        TEXT text
+        JSON photo_ids
+        VARCHAR author_name
+        BIGINT author_avatar_id
+        DATETIME created_at
+    }
+    post_stats {
+        BIGINT post_id PK
+        INT likes_count
+        INT comments_count
+    }
+    likes {
+        BIGINT user_id PK
+        BIGINT post_id PK
+        DATETIME created_at
+    }
+    comments {
+        BIGINT id PK
+        BIGINT post_id
+        BIGINT author_id
+        VARCHAR text
+        VARCHAR author_name
+        DATETIME created_at
+    }
+    photos {
+        BIGINT id PK
+        BIGINT owner_id
+        VARCHAR storage_key
+        INT size
+        DATETIME created_at
+    }
+    communities {
+        BIGINT id PK
+        VARCHAR name
+        TEXT description
+        BIGINT owner_id
+        INT members_count
+        DATETIME created_at
+    }
+    community_members {
+        BIGINT community_id PK
+        BIGINT user_id PK
+        TINYINT role
+        DATETIME joined_at
+    }
